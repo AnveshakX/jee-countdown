@@ -13,17 +13,35 @@ class CountdownWallpaperService : WallpaperService() {
         private val handler = Handler(Looper.getMainLooper())
         private val renderer = Renderer(this@CountdownWallpaperService)
         private var visible = false
-        private val tick = object : Runnable {
+
+        private val frame = object : Runnable {
             override fun run() {
                 draw()
-                if (visible) handler.postDelayed(this, 30_000)
+                if (visible) handler.postDelayed(this, renderer.nextDelayMs(false))
             }
+        }
+
+        // Redraw straight away when settings change in the app
+        private val listener: () -> Unit = {
+            handler.post {
+                if (visible) {
+                    handler.removeCallbacks(frame)
+                    frame.run()
+                } else {
+                    draw()
+                }
+            }
+        }
+
+        override fun onCreate(surfaceHolder: SurfaceHolder) {
+            super.onCreate(surfaceHolder)
+            CfgStore.listeners.add(listener)
         }
 
         override fun onVisibilityChanged(v: Boolean) {
             visible = v
-            handler.removeCallbacks(tick)
-            if (v) tick.run()
+            handler.removeCallbacks(frame)
+            if (v) frame.run()
         }
 
         override fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -33,7 +51,8 @@ class CountdownWallpaperService : WallpaperService() {
 
         override fun onDestroy() {
             visible = false
-            handler.removeCallbacks(tick)
+            handler.removeCallbacks(frame)
+            CfgStore.listeners.remove(listener)
             super.onDestroy()
         }
 
