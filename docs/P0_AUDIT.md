@@ -112,3 +112,32 @@ and uploads of test reports, lint report and both APKs.
 3. Local export/import of settings and countdowns (replaces the cloud backup you no longer get).
 4. M6/M7/M8 performance items once measured on a real device.
 5. Optional event start time and time zone; notifications for milestones.
+
+## 7. Build failure of 22 Nov 2026: stale `Cfg.kt` (resolved)
+
+Symptom (CI, Kotlin compile): redeclaration of `Theme`, `Themes`, `Fonts`, `Cfg` (Cfg.kt vs CfgModel.kt) and `CfgStore`
+(Cfg.kt vs CfgStore.kt); `MainActivity.kt` lines 161/476 "Unresolved reference: flush" and 174/478 "inferred type is Unit but
+Cfg was expected".
+
+Root cause: not a design inconsistency in the P0 code. The earlier v2 zip contained `Cfg.kt` (config model + a simple store).
+The P0 zip replaced that with `CfgModel.kt` (model, `CfgCodec`) + `CfgStore.kt` (cache, debounced persistence, `flush()`), and
+simply no longer contains `Cfg.kt`. Unzipping P0 over the old tree overwrites same-named files but cannot delete `Cfg.kt`, so
+both implementations were compiled. Every `MainActivity` error follows from that: the call sites are written against the P0
+`CfgStore` (`set` returns the sanitised `Cfg`, `flush()` exists), and the compiler picked the old `CfgStore` (`set` returned
+`Unit`, no `flush`). The line numbers in the report match the P0 `MainActivity` exactly.
+
+Authoritative implementation: **`CfgModel.kt` + `CfgStore.kt`**. `Cfg.kt` is obsolete. Nothing in it needs migrating, checked
+against the v2 definitions: `Theme` class, all 7 theme definitions, `Fonts`, and every `Cfg` field and default are identical
+to `CfgModel.kt`; the 19 persisted preference keys are the same set, so existing installs read their settings unchanged (and
+`CfgCodec` additionally clamps/validates them).
+
+Fix: delete `app/src/main/java/com/jeecountdown/Cfg.kt` from the repository. No other source change is needed: all 15 call sites
+of `CfgStore` (`get`, `set`, `flush`, `changed`, `listeners`) match the declared API.
+
+Prevention (new): `scripts/check_sources.py` fails CI in seconds, before Gradle, when the same top-level class/object is declared
+in two files of one source set, and prints which files. `--refs` is an advisory check for `Object.member` and `Cfg(...)` /
+`.copy(...)` argument names that do not exist. Run against a reconstruction of the old `Cfg.kt` plus the P0 files, it reports
+exactly the five redeclarations from the CI log (Theme, Themes, Fonts, Cfg, CfgStore); on the delivered tree it reports none.
+
+Verification limits: still no Kotlin compiler, Gradle or network in the authoring environment, and the project has no
+`gradlew` (CI calls `gradle`). `testDebugUnitTest`, `assembleDebug` and lint were **not run here**; they run in CI.

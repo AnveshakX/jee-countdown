@@ -25,6 +25,9 @@ jobs:
         with:
           gradle-version: 8.11.1
 
+      - name: Source sanity (duplicate declarations from stale files)
+        run: python3 scripts/check_sources.py
+
       - name: Unit tests
         run: gradle --no-daemon testDebugUnitTest
 
