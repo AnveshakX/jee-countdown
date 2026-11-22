@@ -1,8 +1,20 @@
-name: Build APK
-on: [push, workflow_dispatch]
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -11,9 +23,47 @@ jobs:
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.7
-      - run: gradle assembleDebug
-      - uses: actions/upload-artifact@v4
+          gradle-version: 8.11.1
+
+      - name: Unit tests
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Release build (R8 + resource shrinking, unsigned)
+        run: gradle --no-daemon assembleRelease
+
+      - name: Lint (reported, not yet blocking)
+        run: gradle --no-daemon lintDebug
+        continue-on-error: true
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: jee-countdown-apk
+          name: unit-test-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest
+            app/build/test-results/testDebugUnitTest
+          if-no-files-found: ignore
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: countdown-wallpaper-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload release APK (unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: countdown-wallpaper-release-unsigned
+          path: app/build/outputs/apk/release/*.apk
