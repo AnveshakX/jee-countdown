@@ -1,50 +1,38 @@
 package com.jeecountdown
 
 import android.content.Context
+import android.util.Log
 import java.time.LocalDate
 
-data class Exam(val name: String, val epochDay: Long)
-data class Upcoming(val exam: Exam, val startDay: Long)
-
+/** Android facade over [ExamRepo]; keeps the call sites simple and notifies listeners on change. */
 object Exams {
-    private fun prefs(c: Context) = c.applicationContext.getSharedPreferences("p", Context.MODE_PRIVATE)
+    private const val PREFS_NAME = "p"
+    @Volatile private var repo: ExamRepo? = null
 
-    fun load(c: Context): List<Exam> {
-        val raw = prefs(c).getString("exams", null) ?: return emptyList()
-        if (raw.isBlank()) return emptyList()
-        return raw.split(";").mapNotNull { p ->
-            val a = p.split("|")
-            val d = a.getOrNull(1)?.toLongOrNull()
-            if (a.size == 2 && d != null) Exam(a[0], d) else null
+    private fun repo(ctx: Context): ExamRepo =
+        repo ?: synchronized(this) {
+            repo ?: ExamRepo(
+                PrefsStore(ctx.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)),
+                { LocalDate.now().toEpochDay() },
+                { Log.w("Exams", it) }
+            ).also { repo = it }
         }
-    }
 
-    fun save(c: Context, list: List<Exam>) {
-        val s = list.joinToString(";") { "${it.name.replace(Regex("[|;]"), " ")}|${it.epochDay}" }
-        prefs(c).edit().putString("exams", s).apply()
+    fun load(ctx: Context): List<Exam> = repo(ctx).load()
+    fun version(ctx: Context): Int = repo(ctx).version
+
+    fun add(ctx: Context, name: String, epochDay: Long) {
+        repo(ctx).add(name, epochDay)
         CfgStore.changed()
     }
 
-    fun add(c: Context, e: Exam) {
-        val l = load(c)
-        if (l.isEmpty()) prefs(c).edit().putLong("s", LocalDate.now().toEpochDay()).apply()
-        save(c, l + e)
+    fun updateDate(ctx: Context, e: Exam, newEpochDay: Long) {
+        repo(ctx).updateDate(e, newEpochDay)
+        CfgStore.changed()
     }
 
-    // The day the first countdown "started": when it was added
-    private fun start(c: Context): Long {
-        val p = prefs(c)
-        if (!p.contains("s")) p.edit().putLong("s", LocalDate.now().toEpochDay()).apply()
-        return p.getLong("s", LocalDate.now().toEpochDay())
-    }
-
-    // Nearest countdown that hasn't passed; ring starts from the previous one (or when the first was added)
-    fun next(c: Context, today: LocalDate): Upcoming? {
-        val t = today.toEpochDay()
-        val sorted = load(c).sortedBy { it.epochDay }
-        val i = sorted.indexOfFirst { it.epochDay >= t }
-        if (i < 0) return null
-        val prev = sorted.getOrNull(i - 1)
-        return Upcoming(sorted[i], prev?.epochDay ?: start(c))
+    fun remove(ctx: Context, e: Exam) {
+        repo(ctx).remove(e)
+        CfgStore.changed()
     }
 }

@@ -4,21 +4,39 @@ plugins {
 }
 android {
     namespace 'com.jeecountdown'
-    compileSdk 34
+    compileSdk 36
     defaultConfig {
         applicationId 'com.jeecountdown'
         minSdk 26
-        targetSdk 34
-        versionCode 2
-        versionName '2.0'
+        targetSdk 36   // Google Play requires 36 for new apps and updates since 31 Aug 2026 (docs/P0_AUDIT.md, H1)
+        versionCode 4
+        versionName '2.2'
+    }
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = '17' }
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+    lint {
+        abortOnError = false   // reported in CI; made blocking once a baseline is established
+        warningsAsErrors = false
+        checkReleaseBuilds = false
+        htmlReport = true
+        xmlReport = true
+    }
 }
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.google.android.material:material:1.12.0'
+    testImplementation 'junit:junit:4.13.2'
 }

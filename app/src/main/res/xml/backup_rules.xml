@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and lower. Personal data (countdown names/dates, labels, background photo) is kept out of cloud backup. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="p.xml" />
+    <exclude domain="sharedpref" path="cfg.xml" />
+    <exclude domain="file" path="bg.jpg" />
+    <exclude domain="file" path="bg.tmp" />
+</full-backup-content>

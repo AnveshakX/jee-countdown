@@ -16,6 +16,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
@@ -38,11 +39,17 @@ import com.google.android.material.textfield.TextInputLayout
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
+
+    private companion object {
+        const val TAG = "MainActivity"
+    }
 
     private class Preset(val name: String, val date: LocalDate?)
 
@@ -78,6 +85,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cfg: Cfg
 
     private val handler = Handler(Looper.getMainLooper())
+    private val io: ExecutorService = Executors.newSingleThreadExecutor()
     private val widgetRun = Runnable { CountdownWidget.updateAll(applicationContext) }
     private val cfgListener: () -> Unit = {
         handler.removeCallbacks(widgetRun)
@@ -149,16 +157,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onPause() {
+        CfgStore.flush() // persist any debounced setting before the app can be killed
+        super.onPause()
+    }
+
     override fun onDestroy() {
         CfgStore.listeners.remove(cfgListener)
         handler.removeCallbacks(widgetRun)
+        io.shutdown()
         super.onDestroy()
     }
 
     // ---------- state ----------
     private fun upd(rebuild: Boolean = false, f: (Cfg) -> Cfg) {
-        cfg = f(cfg)
-        CfgStore.set(this, cfg)
+        cfg = CfgStore.set(this, f(cfg))
         preview.invalidate()
         if (rebuild) panel.post { build() }
     }
@@ -198,7 +211,7 @@ class MainActivity : AppCompatActivity() {
             })
         }
         if (cfg.bgMode == 2) {
-            panel.addView(outlined(if (cfg.photoVersion == 0L) "Choose photo" else "Change photo") {
+            panel.addView(outlined(if (PhotoCache.file(this).exists()) "Change photo" else "Choose photo") {
                 pickPhoto.launch("image/*")
             })
             panel.addView(sliderRow("Dim", cfg.dim) { v -> upd { it.copy(dim = v) } })
@@ -378,7 +391,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun editDate(e: Exam) {
         pickDate(e.epochDay) { d ->
-            Exams.save(this, Exams.load(this).map { if (it == e) Exam(e.name, d) else it })
+            Exams.updateDate(this, e, d)
             build()
         }
     }
@@ -387,7 +400,7 @@ class MainActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this)
             .setTitle("Delete ${e.name}?")
             .setPositiveButton("Delete") { _, _ ->
-                Exams.save(this, Exams.load(this).filter { it != e })
+                Exams.remove(this, e)
                 build()
             }
             .setNegativeButton("Cancel", null)
@@ -395,7 +408,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun finishAdd(name: String, epochDay: Long) {
-        Exams.add(this, Exam(name, epochDay))
+        Exams.add(this, name, epochDay)
         build()
         preview.invalidate()
     }
@@ -442,30 +455,61 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- photo ----------
+    // Decoding, rotating and re-encoding a large photo can take hundreds of ms and lots of memory,
+    // so it runs off the main thread and writes via a temp file (the live file is never half-written).
     private fun savePhoto(uri: Uri) {
-        try {
-            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return
-            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
-            var sample = 1
-            while (maxOf(o.outWidth, o.outHeight) / sample > 2200) sample *= 2
-            val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
-            var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o2) ?: return
-            val rot = when (ExifInterface(ByteArrayInputStream(bytes))
-                .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-                else -> 0f
+        val app = applicationContext
+        io.execute {
+            val ok = try {
+                importPhoto(uri)
+            } catch (e: OutOfMemoryError) {
+                Log.w(TAG, "Photo too large to import", e)
+                false
+            } catch (e: Exception) {
+                Log.w(TAG, "Photo import failed", e)
+                false
             }
-            if (rot != 0f) {
-                bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rot) }, true)
+            handler.post {
+                if (!ok) return@post
+                PhotoCache.release()
+                val c = CfgStore.set(app, CfgStore.get(app).copy(bgMode = 2, photoVersion = System.currentTimeMillis()))
+                CfgStore.flush()
+                if (!isDestroyed) {
+                    cfg = c
+                    build()
+                    preview.invalidate()
+                }
             }
-            FileOutputStream(File(filesDir, "bg.jpg")).use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-            upd(true) { it.copy(bgMode = 2, photoVersion = System.currentTimeMillis()) }
-        } catch (e: Exception) {
-            // ignore unreadable images
         }
+    }
+
+    private fun importPhoto(uri: Uri): Boolean {
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return false
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+        if (o.outWidth <= 0 || o.outHeight <= 0) return false
+        var sample = 1
+        while (maxOf(o.outWidth, o.outHeight) / sample > PhotoCache.LARGE_SIDE) sample *= 2
+        val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
+        var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o2) ?: return false
+        val rot = when (ExifInterface(ByteArrayInputStream(bytes))
+            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+            else -> 0f
+        }
+        if (rot != 0f) {
+            bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rot) }, true)
+        }
+        val tmp = File(filesDir, PhotoCache.TEMP_NAME)
+        FileOutputStream(tmp).use { if (!bmp.compress(Bitmap.CompressFormat.JPEG, 90, it)) return false }
+        val dest = PhotoCache.file(this)
+        if (!tmp.renameTo(dest)) {
+            tmp.copyTo(dest, overwrite = true)
+            tmp.delete()
+        }
+        return true
     }
 
     // ---------- system hooks ----------
